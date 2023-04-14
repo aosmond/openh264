@@ -122,6 +122,27 @@ GMPPlatformAPI* g_platform_api = nullptr;
 
 class OpenH264VideoEncoder;
 
+static uint32_t GMPLogLevelToWelsLogLevel(GMPLogLevel aLevel) {
+  switch (aLevel) {
+    default:
+    case kGMPLogInvalid:
+    case kGMPLogDefault:
+      return WELS_LOG_DEFAULT;
+    case kGMPLogQuiet:
+      return WELS_LOG_QUIET;
+    case kGMPLogError:
+      return WELS_LOG_ERROR;
+    case kGMPLogWarning:
+      return WELS_LOG_WARNING;
+    case kGMPLogInfo:
+      return WELS_LOG_INFO;
+    case kGMPLogDebug:
+      return WELS_LOG_DEBUG;
+    case kGMPLogDetail:
+      return WELS_LOG_DETAIL;
+  }
+}
+
 template <typename T> class SelfDestruct {
  public:
   SelfDestruct (T* t) : t_ (t) {}
@@ -190,6 +211,7 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
     max_payload_size_ (0),
     callback_ (nullptr),
     stats_ ("Encoder"),
+    gmp_api_version_ (kGMPVersion33),
     shutting_down(false) {
       AddRef();
     }
@@ -200,6 +222,7 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
                            GMPVideoEncoderCallback* callback,
                            int32_t numberOfCores,
                            uint32_t maxPayloadSize) {
+    gmp_api_version_ = codecSettings.mGMPApiVersion;
     callback_ = callback;
 
     GMPErr err = g_platform_api->createthread (&worker_thread_);
@@ -214,6 +237,15 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
       Error (GMPGenericErr);
       return;
     }
+
+    if (gmp_api_version_ >= kGMPVersion34) {
+      uint32_t logLevel = GMPLogLevelToWelsLogLevel(codecSettings.mLogLevel);
+      long rv = encoder_->SetOption(ENCODER_OPTION_TRACE_LEVEL, &logLevel);
+      if (rv != cmResultSuccess) {
+        GMPLOG (GL_ERROR, "Encoder SetOption OPTION_TRACE_LEVEL failed " << rv);
+      }
+    }
+
     SEncParamExt param;
     memset (&param, 0, sizeof (param));
     encoder_->GetDefaultParams (&param);
@@ -604,6 +636,7 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
   uint32_t max_payload_size_;
   GMPVideoEncoderCallback* callback_;
   FrameStats stats_;
+  uint32_t gmp_api_version_;
   bool shutting_down;
 };
 
@@ -625,6 +658,7 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
     callback_ (nullptr),
     decoder_ (nullptr),
     stats_ ("Decoder"),
+    gmp_api_version_ (kGMPVersion33),
     shutting_down(false) {
       AddRef();
     }
@@ -634,6 +668,7 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
                            uint32_t aCodecSpecificSize,
                            GMPVideoDecoderCallback* callback,
                            int32_t coreCount) {
+    gmp_api_version_ = codecSettings.mGMPApiVersion;
     callback_ = callback;
 
     GMPLOG (GL_INFO, "InitDecode");
@@ -655,6 +690,21 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
       GMPLOG (GL_ERROR, "Couldn't create decoder");
       Error (GMPGenericErr);
       return;
+    }
+
+    if (gmp_api_version_ >= kGMPVersion34) {
+      if (codecSettings.mUseThreadedDecode) {
+        long rv = decoder_->SetOption(DECODER_OPTION_NUM_OF_THREADS, &coreCount);
+        if (rv != cmResultSuccess) {
+          GMPLOG (GL_ERROR, "Decoder SetOption NUM_OF_THREADS failed " << rv);
+        }
+      }
+
+      uint32_t logLevel = GMPLogLevelToWelsLogLevel(codecSettings.mLogLevel);
+      long rv = decoder_->SetOption(DECODER_OPTION_TRACE_LEVEL, &logLevel);
+      if (rv != cmResultSuccess) {
+        GMPLOG (GL_ERROR, "Decoder SetOption OPTION_TRACE_LEVEL failed " << rv);
+      }
     }
 
     SDecodingParam param;
@@ -759,7 +809,10 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
   }
 
   virtual void Reset() {
-    if (callback_) {
+    if (gmp_api_version_ >= kGMPVersion34) {
+      worker_thread_->Post (WrapTaskRefCounted (
+                              this, &OpenH264VideoDecoder::Reset_w));
+    } else if (callback_) {
       callback_->ResetComplete ();
     }
   }
@@ -823,6 +876,9 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
     SBufferInfo decoded;
     bool valid = false;
     memset (&decoded, 0, sizeof (decoded));
+    if (gmp_api_version_ >= kGMPVersion34) {
+      decoded.uiInBsTimeStamp = inputFrame->TimeStamp();
+    }
     unsigned char* data[3] = {nullptr, nullptr, nullptr};
 
     dState = decoder_->DecodeFrameNoDelay (inputFrame->Buffer(),
@@ -911,6 +967,9 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
     GMPLOG (GL_DEBUG, "Allocated size = "
             << frame->AllocatedSize (kGMPYPlane));
     frame->SetTimestamp (inputFrame->TimeStamp());
+    if (gmp_api_version_ >= kGMPVersion34) {
+      frame->SetUpdatedTimestamp (decoded->uiOutYuvTimeStamp);
+    }
     frame->SetDuration (inputFrame->Duration());
     if (callback_) {
       callback_->Decoded (frame);
@@ -919,11 +978,43 @@ class OpenH264VideoDecoder : public GMPVideoDecoder, public RefCounted {
     stats_.FrameOut();
   }
 
+  void Reset_w () {
+    int eos = 1;
+    long rv = decoder_->SetOption(DECODER_OPTION_END_OF_STREAM, &eos);
+    if (rv != cmResultSuccess) {
+      GMPLOG (GL_ERROR, "Decoder SetOption END_OF_STREAM failed " << rv);
+    }
+
+    DECODING_STATE dState;
+    SBufferInfo decoded;
+    unsigned char* data[3];
+    do {
+      memset (&decoded, 0, sizeof (decoded));
+      memset (data, 0, sizeof (data));
+      dState = decoder_->FlushFrame(data, &decoded);
+      if (dState) {
+        GMPLOG (GL_ERROR, "Flush error dState=" << dState);
+        break;
+      }
+    } while (decoded.iBufferStatus == 1);
+
+    TrySyncRunOnMainThread (WrapTask (
+                                 this,
+                                 &OpenH264VideoDecoder::Reset_m));
+  }
+
+  void Reset_m () {
+    if (callback_) {
+      callback_->ResetComplete ();
+    }
+  }
+
   GMPVideoHost* host_;
   GMPThread* worker_thread_;
   GMPVideoDecoderCallback* callback_;
   ISVCDecoder* decoder_;
   FrameStats stats_;
+  uint32_t gmp_api_version_;
   bool shutting_down;
 };
 
