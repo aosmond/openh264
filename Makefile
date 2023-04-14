@@ -29,7 +29,7 @@ LIBDIR_NAME=lib
 SHAREDLIB_DIR=$(PREFIX)/lib
 PROJECT_NAME=openh264
 MODULE_NAME=gmpopenh264
-GMP_API_BRANCH=Firefox39
+GMP_API_BRANCH=ao_bug1827703
 GTEST_VER=release-1.8.1
 CCASFLAGS=$(CFLAGS)
 STATIC_LDFLAGS=-lstdc++
@@ -173,7 +173,7 @@ endif
 	$(QUIET)rm -f $(OBJS) $(OBJS:.$(OBJ)=.d) $(OBJS:.$(OBJ)=.obj) $(LIBRARIES) $(BINARIES) *.lib *.a *.dylib *.dll *.so *.so.* *.exe *.pdb *.exp *.pc *.res *.map $(SRC_PATH)codec/common/inc/version_gen.h
 
 gmp-bootstrap:
-	if [ ! -d gmp-api ] ; then git clone https://github.com/mozilla/gmp-api gmp-api ; fi
+	if [ ! -d gmp-api ] ; then git clone https://github.com/aosmond/gmp-api gmp-api ; fi
 	cd gmp-api && git fetch origin && git checkout $(GMP_API_BRANCH)
 
 gtest-bootstrap:
