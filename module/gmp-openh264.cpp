@@ -406,6 +406,10 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
     // TODO(ekr@rtfm.com). Scary conversion from unsigned char to float below.
     param.fMaxFrameRate = static_cast<float> (codecSettings.mMaxFramerate);
 
+    if (gmp_api_version_ >= kGMPVersion36) {
+      param.iTemporalLayerNum = codecSettings.mTemporalLayerNum;
+    }
+
     // Set up layers. Currently we have one layer.
     SSpatialLayerConfig* layer = &param.sSpatialLayers[0];
 
@@ -740,6 +744,10 @@ class OpenH264VideoEncoder : public GMPVideoEncoder, public RefCounted {
     f->SetFrameType (frame_type);
     f->SetCompleteFrame (true);
     f->SetBufferType (GMP_BufferLength32);
+
+    if (gmp_api_version_ >= kGMPVersion36) {
+      f->SetTemporalLayerId (encoded->iLayerNum);
+    }
 
     GMPLOG (GL_DEBUG, "Encoding complete. type= "
             << f->FrameType()
